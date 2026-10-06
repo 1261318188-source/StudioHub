@@ -1,0 +1,124 @@
+-- =================================================================
+-- Roblox Ollama 实时脚本界面翻译器 (Ollama UI Translator)
+-- 说明：本地运行 Ollama 并开启 CORS 支持，先加载此脚本再加载其他英文脚本
+-- =================================================================
+
+local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local CoreGui = game:GetService("CoreGui")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+-- Ollama 本地 API 配置
+local OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+local MODEL_NAME = "qwen2.5:7b" -- 可更改为你在 Ollama 中安装的模型名称
+
+-- 已翻译文本缓存，避免重复请求 API
+local TranslationCache = {}
+
+-- 发送请求至本地 Ollama 进行翻译
+local function translateText(text)
+    -- 清理空格与特殊字符
+    local cleanText = string.gsub(text, "^%s*(.-)%s*$", "%1")
+    if cleanText == "" or tonumber(cleanText) then
+        return text
+    end
+
+    -- 命中缓存直接返回
+    if TranslationCache[cleanText] then
+        return TranslationCache[cleanText]
+    end
+
+    -- 构建发送给 Ollama 的 Prompt
+    local prompt = "Translate the following Roblox UI text to Simplified Chinese. Reply with ONLY the direct translation, do not include quotes, explanations, or extra text:\n" .. cleanText
+
+    local requestData = {
+        Url = OLLAMA_URL,
+        Method = "POST",
+        Headers = {
+            ["Content-Type"] = "application/json"
+        },
+        Body = HttpService:JSONEncode({
+            model = MODEL_NAME,
+            prompt = prompt,
+            stream = false
+        })
+    }
+
+    -- 兼容不同注入器的 HTTP 请求函数
+    local httpRequest = (syn and syn.request) or (http and http.request) or request or http_request
+
+    if not httpRequest then
+        warn("[Ollama Translator] 错误：当前注入器不支持 HTTP 请求 (request / http_request)")
+        return text
+    end
+
+    local success, response = pcall(function()
+        return httpRequest(requestData)
+    end)
+
+    if success and response and response.StatusCode == 200 then
+        local responseData = HttpService:JSONDecode(response.Body)
+        if responseData and responseData.response then
+            local translated = string.gsub(responseData.response, "^%s*(.-)%s*$", "%1")
+            -- 存入缓存
+            TranslationCache[cleanText] = translated
+            return translated
+        end
+    end
+
+    return text
+end
+
+-- 检查并处理 GUI 元素文本
+local function processGuiElement(element)
+    if element:IsA("TextLabel") or element:IsA("TextButton") or element:IsA("TextBox") then
+        local originalText = element.Text
+        if originalText and #originalText > 0 then
+            -- 异步翻译，防止卡顿主线程
+            task.spawn(function()
+                local translated = translateText(originalText)
+                if translated and translated ~= originalText then
+                    element.Text = translated
+                end
+            end)
+        end
+
+        -- 监听文本动态变更
+        element:GetPropertyChangedSignal("Text"):Connect(function()
+            local newText = element.Text
+            if newText and #newText > 0 and not TranslationCache[newText] then
+                task.spawn(function()
+                    local translated = translateText(newText)
+                    if translated and translated ~= newText then
+                        element.Text = translated
+                    end
+                end)
+            end
+        end)
+    end
+end
+
+-- 遍历界面树结构
+local function scanGui(container)
+    for _, child in ipairs(container:GetDescendants()) do
+        processGuiElement(child)
+    end
+
+    -- 监听新增元素
+    container.DescendantAdded:Connect(function(child)
+        processGuiElement(child)
+    end)
+end
+
+-- 初始化监听
+print("[Ollama Translator] 实时翻译引擎正在启动...")
+scanGui(PlayerGui)
+
+-- 尝试监听 CoreGui（部分第三方脚本界面可能挂载在 CoreGui 下）
+pcall(function()
+    scanGui(CoreGui)
+end)
+
+print("[Ollama Translator] 监听已就绪！现在可以运行其他英文脚本。")
